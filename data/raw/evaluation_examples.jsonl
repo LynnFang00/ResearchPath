@@ -1,0 +1,2 @@
+{"query_id":"agents_scientific_discovery_intro","query":"AI agents for scientific discovery","relevant_paper_ids":[5,6],"notes":"Toy weak labels for the sample dataset; replace with citation-derived labels for real evaluation."}
+{"query_id":"scientific_paper_representations","query":"citation informed transformer embeddings for scientific papers","relevant_paper_ids":[4],"notes":"Toy weak label for validating retrieval evaluation plumbing."}

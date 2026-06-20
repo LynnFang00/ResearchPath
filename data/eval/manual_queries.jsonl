@@ -1,0 +1,20 @@
+{"query_id":"manual_001","query":"large language models","background_level":"basic_ml"}
+{"query_id":"manual_002","query":"LLM agents","background_level":"basic_ml"}
+{"query_id":"manual_003","query":"retrieval augmented generation","background_level":"basic_ml"}
+{"query_id":"manual_004","query":"graph neural networks","background_level":"basic_ml"}
+{"query_id":"manual_005","query":"diffusion models","background_level":"basic_ml"}
+{"query_id":"manual_006","query":"reinforcement learning from human feedback","background_level":"basic_ml"}
+{"query_id":"manual_007","query":"AI for scientific discovery","background_level":"basic_ml"}
+{"query_id":"manual_008","query":"Bayesian optimization","background_level":"basic_ml"}
+{"query_id":"manual_009","query":"recommendation systems","background_level":"basic_ml"}
+{"query_id":"manual_010","query":"transformer architectures for natural language processing","background_level":"beginner"}
+{"query_id":"manual_011","query":"multimodal foundation models","background_level":"basic_ml"}
+{"query_id":"manual_012","query":"self-supervised learning","background_level":"basic_ml"}
+{"query_id":"manual_013","query":"contrastive learning","background_level":"basic_ml"}
+{"query_id":"manual_014","query":"causal representation learning","background_level":"intermediate"}
+{"query_id":"manual_015","query":"federated learning","background_level":"basic_ml"}
+{"query_id":"manual_016","query":"AI safety and alignment","background_level":"basic_ml"}
+{"query_id":"manual_017","query":"automated machine learning","background_level":"basic_ml"}
+{"query_id":"manual_018","query":"neural information retrieval","background_level":"basic_ml"}
+{"query_id":"manual_019","query":"AI agents for scientific discovery","background_level":"basic_ml"}
+{"query_id":"manual_020","query":"uncertainty estimation in deep learning","background_level":"intermediate"}
