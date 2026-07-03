@@ -14,7 +14,7 @@ class Paper(Base):
     abstract: Mapped[str] = mapped_column(Text, nullable=False)
     authors: Mapped[str] = mapped_column(Text, nullable=False, default="")
     year: Mapped[int | None] = mapped_column(Integer, nullable=True, index=True)
-    venue: Mapped[str | None] = mapped_column(String(256), nullable=True)
+    venue: Mapped[str | None] = mapped_column(Text, nullable=True)
     categories: Mapped[str] = mapped_column(Text, nullable=False, default="")
     citation_count: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
     source_url: Mapped[str | None] = mapped_column(Text, nullable=True)

@@ -38,6 +38,21 @@ def test_build_retriever_supports_tfidf_and_citation_recency() -> None:
     assert isinstance(build_retriever("citation_recency", documents), CitationRecencyRetriever)
 
 
+def test_build_retriever_requires_full_metadata_for_learned_blend_v2_7() -> None:
+    with pytest.raises(ValueError, match="V2.7 learned blend retrieval requires full paper metadata"):
+        build_retriever("learned_blend_v2_7", [])
+
+
+def test_build_retriever_requires_full_metadata_for_v3_3_ltr() -> None:
+    with pytest.raises(ValueError, match="V3.3 LTR retrieval requires full paper metadata"):
+        build_retriever("v3_3_ltr", [])
+
+
+def test_build_retriever_requires_full_metadata_for_v4_1_blend() -> None:
+    with pytest.raises(ValueError, match="V4.1 blend retrieval requires full paper metadata"):
+        build_retriever("v4_1_blend", [])
+
+
 def test_build_retriever_rejects_unknown_method() -> None:
     with pytest.raises(ValueError, match="Unsupported recommendation method"):
         build_retriever("unknown", [])

@@ -9,9 +9,20 @@ The long-term goal is not just semantic paper search. Given a goal like "I want 
 3. Core method papers
 4. Recent frontier papers
 
-The current milestone has moved past the foundation into measured retrieval experiments: BM25/TF-IDF, frozen transformer embeddings, FAISS, and first bi-encoder fine-tuning runs are all evaluated against the same weak-label benchmark.
+The current milestone has moved past the foundation into a measured learning-to-rank pipeline: BM25/TF-IDF, frozen transformer embeddings, FAISS, random-forest LTR, calibrated blends, guarded text scoring, neural reranker diagnostics, and a serialized safe-fusion ranker are all evaluated against versioned judged-label sets.
 
 See [PROJECT_CONTEXT.md](PROJECT_CONTEXT.md) for the living progress log, current status, todos, and detailed deep learning roadmap.
+
+## Current ML Status
+
+ResearchPath keeps `bm25` as the backend default and exposes learned rankers only through explicit opt-in method names:
+
+- `method=v3_3_ltr`: compact random-forest LTR without V2.7 leakage features.
+- `method=v4_1_blend`: calibrated V3.3/V4.1 weighted blend.
+- `method=v4_9_guarded_text_blend`: guarded text-assisted blend accepted after leakage and regression audits.
+- `method=v6_4_safe_fusion`: accepted V6 safe-fusion runtime path, backed by the V6.6 serialized ridge scorer when the required inference-safe component scores are available.
+
+V6.6 is the current accepted offline/runtime parity point. It reproduced the learned ridge fusion scorer from serialized coefficients, created `data/processed/models/v6_6_safe_fusion_candidate.json`, and passed opt-in runtime parity with formula max delta `0.0`, offline/live candidate Jaccard `1.0`, no forbidden runtime features, and no protected-label hash changes. Frontend demo support can compare BM25, V4.9 guarded text, and V6.6 safe fusion only when explicitly enabled; defaults are unchanged.
 
 ## Why This Helps Beginner Researchers
 
@@ -508,6 +519,137 @@ The stable review file is written to `data/processed/evaluations/reading_path_ma
 
 Current limitation: difficulty is still a heuristic model based on metadata, abstract length, technical terms, survey/tutorial signals, citations, and recency. It is useful for coarse routing, but it can misclassify dense surveys, short technical papers, or accessible papers with specialized vocabulary. A trained difficulty model should replace this once there are enough manual labels.
 
+## Milestone 11: Product-Grade Recommendation Experience
+
+ResearchPath now has a more complete recommendation product loop: users can search or build a reading path, inspect why papers were recommended, give feedback, and let that feedback lightly personalize future hybrid rankings.
+
+The product flow is:
+
+1. Enter a research goal.
+2. Choose reading path or flat search.
+3. Select retrieval method and background level.
+4. Review staged sections: Background, Foundational, Core Methods, Recent Frontier.
+5. Inspect confidence, paper type tags, section rationale, read-before/read-after guidance, and ranking signal details.
+6. Send feedback from each card.
+
+Feedback is stored locally through:
+
+```powershell
+POST /feedback
+GET /feedback/summary
+```
+
+Supported actions are `save`, `already_read`, `too_easy`, `too_hard`, `not_relevant`, `more_like_this`, and `less_like_this`. Feedback updates a default local profile; there is no authentication yet.
+
+The profile endpoints are:
+
+```powershell
+GET /profile
+PATCH /profile
+```
+
+The profile tracks background level, saved papers, skipped papers, too-easy papers, too-hard papers, preferred topics, and update time.
+
+Personalization is deliberately transparent and heuristic:
+
+- Papers similar to saved papers receive a small boost.
+- Papers marked not relevant, already read, or less-like-this are skipped/penalized.
+- Beginner users get a penalty for papers similar to items marked too hard.
+- The target difficulty nudges upward if many papers are marked too easy.
+- The target difficulty nudges downward if many papers are marked too hard.
+
+The reading path response includes product explanation fields:
+
+- `why_recommended`
+- `why_this_section`
+- `confidence_label`
+- `read_before`
+- `read_after`
+- `explanation_signals`
+- `paper_type_tags`
+- ranking component diagnostics, including personalization scores
+
+Paper type tags are heuristic and include `survey`, `tutorial`, `book`, `foundation`, `method`, `benchmark`, `application`, `position/opinion`, and `frontier`.
+
+Limitations: feedback is local/default-user only, personalization is rule-based, and paper type classification relies on title/abstract/metadata keywords. This keeps the system explainable, but it is not yet a learned recommender.
+
+Next milestone: train a learned ranking model from manual labels and feedback events, then compare it against the transparent hybrid ranker before replacing any production ranking behavior.
+
+## Milestone 12: MLE-Grade Ranking Evaluation
+
+ResearchPath now has a lightweight learned-ranking layer and a clearer offline evaluation loop. The goal is to make the project credible as an MLE/search/recommendation system without hiding behavior behind a large opaque model.
+
+The new learned method is:
+
+- `learned_hybrid`: runs the existing hybrid retriever, then applies a small linear reranking adjustment from a JSON model artifact.
+
+The model artifact lives at:
+
+```text
+data/processed/models/lightweight_ranker.json
+```
+
+It contains feature names, weights, intercept, version, and training metrics. If the artifact is missing, the system falls back safely to the normal hybrid score with zero learned adjustment.
+
+Generate a manual review file:
+
+```powershell
+.\backend\.venv\Scripts\python.exe scripts\evaluate_reading_paths.py --queries data\eval\manual_queries.jsonl --method hybrid
+```
+
+Add labels to `data/eval/manual_labels.jsonl` with fields such as:
+
+```json
+{"query_id":"llm_agents","paper_id":123,"relevance_score":3,"section_correct":true,"duplicate":false,"too_advanced":false,"too_narrow":false,"notes":"Good core methods paper."}
+```
+
+Train the lightweight ranker:
+
+```powershell
+.\backend\.venv\Scripts\python.exe scripts\train_lightweight_ranker.py --review data\processed\evaluations\reading_path_manual_review.json --labels data\eval\manual_labels.jsonl --output data\processed\models\lightweight_ranker.json
+```
+
+Evaluate the learned method against the transparent baseline:
+
+```powershell
+.\backend\.venv\Scripts\python.exe scripts\evaluate_reading_paths.py --queries data\eval\manual_queries.jsonl --labels data\eval\manual_labels.jsonl --method learned_hybrid --output data\processed\evaluations\reading_path_learned_hybrid_review.json
+```
+
+Evaluation reports now include:
+
+- average relevance
+- section accuracy
+- duplicate, too-narrow, and too-advanced rates
+- labeled Precision@5
+- labeled Recall@10
+- labeled NDCG@10
+- average score by section
+- experiment metadata for the ranking method and label/query sources
+
+Personalization is still transparent. Saved paper tags are promoted into profile `preferred_topics`, and those preferred topics add a small topic-match signal in hybrid and learned-hybrid ranking. This makes library tags useful for filtering and ranking without adding authentication or model training.
+
+Deployment story:
+
+```powershell
+docker compose up db
+cd backend
+.\.venv\Scripts\python.exe -m uvicorn app.main:app --host 127.0.0.1 --port 8000 --reload
+cd ..\frontend
+npm.cmd run dev -- --force
+```
+
+For production-style packaging, keep the learned ranker JSON, dataset manifests, embeddings, and FAISS index under `data/processed/`, then set these backend environment variables as needed:
+
+```env
+DATABASE_URL=postgresql+psycopg://researchpath:researchpath@localhost:5432/researchpath
+EMBEDDING_INDEX_PATH=data/processed/embeddings/all_minilm_l6_v2_5k.npz
+FAISS_INDEX_PATH=data/processed/faiss/all_minilm_l6_v2_5k.faiss
+FAISS_ID_MAP_PATH=data/processed/faiss/all_minilm_l6_v2_5k.ids.npz
+LEARNED_RANKER_PATH=data/processed/models/lightweight_ranker.json
+```
+
+Limitations: the learned ranker is only as good as the manual labels. With few labels, use `hybrid` as the trusted baseline and treat `learned_hybrid` as an experiment. The next serious improvement is collecting more labels and comparing learned ranker versions by NDCG@10 before making learned ranking the default.
+
 ## Repository Layout
 
 ```text
@@ -632,7 +774,7 @@ Method-specific recommendations:
 curl "http://localhost:8000/recommend/query?query=AI%20agents%20scientific%20discovery&k=5&method=faiss_embedding"
 ```
 
-Supported methods are `bm25`, `tfidf`, `citation_recency`, `embedding`, and `faiss_embedding`.
+Supported methods are `bm25`, `tfidf`, `citation_recency`, `embedding`, `faiss_embedding`, `hybrid`, and `learned_hybrid`.
 
 Seed-paper recommendations:
 

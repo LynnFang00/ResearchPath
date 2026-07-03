@@ -18,6 +18,11 @@ def main() -> None:
     parser.add_argument("--dataset-name", default=None, help="Dataset name for the generated manifest.")
     parser.add_argument("--source", default="local_file", help="Dataset source label.")
     parser.add_argument("--notes", default=None, help="Optional manifest notes.")
+    parser.add_argument(
+        "--exact-dedupe-only",
+        action="store_true",
+        help="Disable near-title duplicate scans; keep exact DOI/external-id/title/identifier merges only.",
+    )
     parser.add_argument("--max-warnings", type=int, default=25, help="Maximum warnings to print.")
     args = parser.parse_args()
 
@@ -35,6 +40,7 @@ def main() -> None:
             dataset_name=args.dataset_name,
             source=args.source,
             notes=args.notes,
+            allow_near_title_dedupe=not args.exact_dedupe_only,
         )
 
     print(f"Inserted: {result['inserted']}")

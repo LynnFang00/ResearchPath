@@ -1,3 +1,4 @@
+import json
 import re
 from pathlib import Path
 from typing import Any
@@ -9,6 +10,8 @@ from sqlalchemy.orm import Session
 
 from app.models.citation_edge import CitationEdge
 from app.models.paper import Paper
+from app.models.paper_identifier import PaperIdentifier
+from app.models.paper_source import PaperSource
 from app.schemas.paper import CitationEdgeCreate, PaperCreate
 from app.services.dataset_manifest import (
     DEFAULT_MANIFEST_DIR,
@@ -81,6 +84,117 @@ def _record_reference_key(reference: str) -> str:
     return f"external_id:{lower}"
 
 
+def _normalize_arxiv_identifier(value: str) -> str:
+    value = value.strip()
+    value = re.sub(r"^arxiv:", "", value, flags=re.IGNORECASE).strip()
+    value = re.sub(r"^10\.48550/arxiv\.", "", value, flags=re.IGNORECASE).strip()
+    value = re.sub(r"^https?://arxiv\.org/(abs|pdf)/", "", value, flags=re.IGNORECASE).strip()
+    value = value.removesuffix(".pdf")
+    value = re.sub(r"v[0-9]+$", "", value, flags=re.IGNORECASE)
+    return value.lower()
+
+
+def _normalize_openalex_identifier(value: str) -> str:
+    value = value.strip()
+    value = value.rstrip("/").split("/")[-1]
+    value = re.sub(r"^openalex:", "", value, flags=re.IGNORECASE).strip()
+    return value.upper() if value.lower().startswith("w") else value.lower()
+
+
+def _normalize_doi_identifier(value: str) -> str:
+    value = value.strip()
+    for prefix in ("https://doi.org/", "http://doi.org/", "doi:"):
+        if value.lower().startswith(prefix):
+            value = value[len(prefix) :].strip()
+            break
+    return value.lower()
+
+
+def _extract_arxiv_id(value: str | None) -> str | None:
+    if not value:
+        return None
+    patterns = [
+        r"10\.48550/arxiv\.([0-9]{4}\.[0-9]{4,5})(v[0-9]+)?",
+        r"10\.48550/arxiv\.([A-Za-z\-]+/[0-9]{7})(v[0-9]+)?",
+        r"arxiv:([0-9]{4}\.[0-9]{4,5})(v[0-9]+)?",
+        r"arxiv:([A-Za-z\-]+/[0-9]{7})(v[0-9]+)?",
+        r"arxiv\.org/(?:abs|pdf)/([A-Za-z\-]+/[0-9]{7}|[0-9]{4}\.[0-9]{4,5})(v[0-9]+)?",
+    ]
+    for pattern in patterns:
+        match = re.search(pattern, value, flags=re.IGNORECASE)
+        if match:
+            return _normalize_arxiv_identifier(match.group(1))
+    return None
+
+
+def _identifier_lookup_key(source: str, identifier: str) -> str:
+    normalized_source = source.strip().lower()
+    if normalized_source == "doi":
+        return f"doi:{_normalize_doi_identifier(identifier)}"
+    if normalized_source == "arxiv":
+        return f"external_id:arxiv:{_normalize_arxiv_identifier(identifier)}"
+    if normalized_source == "openalex":
+        return f"external_id:openalex:{_normalize_openalex_identifier(identifier).lower()}"
+    return f"external_id:{normalized_source}:{identifier.strip().lower()}"
+
+
+def _identifier_rows_for_record(record: dict[str, Any], parsed: PaperCreate) -> list[tuple[str, str]]:
+    identifiers: list[tuple[str, str]] = []
+
+    def add(source: str, identifier: Any) -> None:
+        if identifier is None:
+            return
+        source = source.strip().lower()
+        value = str(identifier).strip()
+        if not source or not value:
+            return
+        if source == "doi":
+            value = _normalize_doi_identifier(value)
+        elif source == "arxiv":
+            value = _normalize_arxiv_identifier(value)
+        elif source == "openalex":
+            value = _normalize_openalex_identifier(value)
+        key = (source, value)
+        if key not in identifiers:
+            identifiers.append(key)
+
+    raw_identifiers = record.get("identifiers") or record.get("source_identifiers") or {}
+    if isinstance(raw_identifiers, dict):
+        for source, identifier in raw_identifiers.items():
+            if isinstance(identifier, list):
+                for item in identifier:
+                    add(str(source), item)
+            else:
+                add(str(source), identifier)
+    elif isinstance(raw_identifiers, list):
+        for item in raw_identifiers:
+            if isinstance(item, dict):
+                add(str(item.get("source") or ""), item.get("identifier"))
+
+    add("doi", parsed.doi)
+    add("arxiv", record.get("arxiv_id") or _extract_arxiv_id(parsed.external_id) or _extract_arxiv_id(parsed.doi))
+    add("arxiv", _extract_arxiv_id(parsed.url) or _extract_arxiv_id(parsed.source_url))
+
+    external_id = parsed.external_id or ""
+    if external_id.lower().startswith("openalex:") or "openalex.org/" in external_id.lower():
+        add("openalex", external_id)
+    if external_id.lower().startswith("arxiv:") or "arxiv.org/" in external_id.lower():
+        add("arxiv", external_id)
+    if record.get("openalex_id"):
+        add("openalex", record["openalex_id"])
+
+    return identifiers
+
+
+def _lookup_keys_for_record_with_identifiers(record: dict[str, Any], parsed: PaperCreate) -> list[str]:
+    keys = list(lookup_keys_for_record(parsed))
+    for source, identifier in _identifier_rows_for_record(record, parsed):
+        key = _identifier_lookup_key(source, identifier)
+        if key not in keys:
+            keys.append(key)
+    return keys
+
+
 def _count_words(text: str) -> int:
     return len(re.findall(r"[A-Za-z0-9_]+", text))
 
@@ -119,7 +233,16 @@ def _load_existing_lookup(db: Session) -> dict[str, int]:
     for paper in db.scalars(select(Paper)).all():
         for key in _paper_lookup_keys(paper):
             lookup[key] = paper.id
+    for identifier in db.scalars(select(PaperIdentifier)).all():
+        lookup[_identifier_lookup_key(identifier.source, identifier.identifier)] = identifier.paper_id
     return lookup
+
+
+def _load_existing_identifier_keys(db: Session) -> set[tuple[str, str]]:
+    return {
+        (identifier.source, identifier.identifier)
+        for identifier in db.scalars(select(PaperIdentifier)).all()
+    }
 
 
 def _load_existing_papers(db: Session) -> list[Paper]:
@@ -199,26 +322,48 @@ def _merge_parsed_records(primary: PaperCreate, duplicate: PaperCreate) -> Paper
 
 
 def _dedupe_parsed_records(
-    parsed_rows: list[tuple[int, PaperCreate]],
+    parsed_rows: list[tuple[int, dict[str, Any], PaperCreate]],
     warnings: list[str],
-) -> tuple[list[tuple[int, PaperCreate]], int]:
-    unique_rows: list[tuple[int, PaperCreate]] = []
+    *,
+    allow_near_title_dedupe: bool = True,
+) -> tuple[list[tuple[int, dict[str, Any], PaperCreate]], int]:
+    unique_rows: list[tuple[int, dict[str, Any], PaperCreate]] = []
+    unique_lookup: dict[str, int] = {}
     skipped = 0
-    for row_number, parsed in parsed_rows:
+    for row_number, record, parsed in parsed_rows:
         match_index: int | None = None
         match_kind = ""
-        for index, (_, existing) in enumerate(unique_rows):
-            match = duplicate_match(parsed, existing)
-            if match is not None:
-                match_index = index
-                match_kind = match.kind
+        for key in _lookup_keys_for_record_with_identifiers(record, parsed):
+            if key in unique_lookup:
+                match_index = unique_lookup[key]
+                match_kind = key.split(":", 1)[0]
                 break
+        if match_index is None and allow_near_title_dedupe:
+            for index, (_, _, existing) in enumerate(unique_rows):
+                match = duplicate_match(parsed, existing)
+                if match is not None:
+                    match_index = index
+                    match_kind = match.kind
+                    break
         if match_index is None:
-            unique_rows.append((row_number, parsed))
+            unique_lookup.update(
+                {key: len(unique_rows) for key in _lookup_keys_for_record_with_identifiers(record, parsed)}
+            )
+            unique_rows.append((row_number, record, parsed))
             continue
 
-        original_row_number, existing = unique_rows[match_index]
-        unique_rows[match_index] = (original_row_number, _merge_parsed_records(existing, parsed))
+        original_row_number, original_record, existing = unique_rows[match_index]
+        merged_record = {**record, **original_record}
+        unique_rows[match_index] = (original_row_number, merged_record, _merge_parsed_records(existing, parsed))
+        unique_lookup.update(
+            {
+                key: match_index
+                for key in _lookup_keys_for_record_with_identifiers(
+                    unique_rows[match_index][1],
+                    unique_rows[match_index][2],
+                )
+            }
+        )
         warnings.append(
             f"Row {row_number}: merged duplicate paper by {match_kind} with row {original_row_number}."
         )
@@ -227,17 +372,23 @@ def _dedupe_parsed_records(
 
 
 def _find_existing_duplicate(
+    record: dict[str, Any],
     parsed: PaperCreate,
     *,
     lookup: dict[str, int],
     existing_papers: list[Paper],
+    existing_by_id: dict[int, Paper],
+    allow_near_title_dedupe: bool = True,
 ) -> tuple[Paper | None, str]:
-    for key in lookup_keys_for_record(parsed):
+    for key in _lookup_keys_for_record_with_identifiers(record, parsed):
         existing_id = lookup.get(key)
         if existing_id is not None:
-            for paper in existing_papers:
-                if paper.id == existing_id:
-                    return paper, key.split(":", 1)[0]
+            paper = existing_by_id.get(existing_id)
+            if paper is not None:
+                return paper, key.split(":", 1)[0]
+
+    if not allow_near_title_dedupe:
+        return None, ""
 
     for paper in existing_papers:
         match = duplicate_match(parsed, paper)
@@ -291,6 +442,95 @@ def _merge_into_existing_paper(paper: Paper, parsed: PaperCreate) -> bool:
         changed = True
 
     return changed
+
+
+def _source_record_id(record: dict[str, Any], parsed: PaperCreate, source: str | None) -> str:
+    if parsed.external_id:
+        return parsed.external_id
+    if parsed.doi:
+        return f"doi:{_normalize_doi_identifier(parsed.doi)}"
+    arxiv_id = record.get("arxiv_id") or _extract_arxiv_id(parsed.url) or _extract_arxiv_id(parsed.source_url)
+    if arxiv_id:
+        return f"arxiv:{_normalize_arxiv_identifier(str(arxiv_id))}"
+    return f"{source or parsed.source or 'local_file'}:{normalize_title(parsed.title)}"
+
+
+def _upsert_identifier(
+    *,
+    db: Session,
+    paper_id: int,
+    source: str,
+    identifier: str,
+    lookup: dict[str, int],
+    identifier_keys: set[tuple[str, str]],
+) -> None:
+    identifier_key = (source, identifier)
+    if identifier_key in identifier_keys:
+        return
+    lookup_key = _identifier_lookup_key(source, identifier)
+    existing_paper_id = lookup.get(lookup_key)
+    if existing_paper_id is not None and existing_paper_id != paper_id:
+        return
+    db.add(PaperIdentifier(paper_id=paper_id, source=source, identifier=identifier))
+    lookup[lookup_key] = paper_id
+    identifier_keys.add(identifier_key)
+
+
+def _upsert_source_record(
+    *,
+    db: Session,
+    paper_id: int,
+    record: dict[str, Any],
+    parsed: PaperCreate,
+    source: str | None,
+) -> None:
+    source_name = str(parsed.source or source or record.get("source") or "local_file").strip().lower()
+    source_record_id = _source_record_id(record, parsed, source_name)
+    existing = db.scalar(
+        select(PaperSource).where(
+            PaperSource.paper_id == paper_id,
+            PaperSource.source == source_name,
+            PaperSource.source_record_id == source_record_id,
+        )
+    )
+    raw_metadata = record.get("raw_source_metadata") or record.get("source_record") or record
+    raw_metadata_json = json.dumps(raw_metadata, ensure_ascii=True, sort_keys=True, default=str)
+    if existing is not None:
+        existing.source_url = parsed.source_url or parsed.url or existing.source_url
+        existing.raw_metadata_json = raw_metadata_json
+        db.add(existing)
+        return
+    db.add(
+        PaperSource(
+            paper_id=paper_id,
+            source=source_name,
+            source_record_id=source_record_id,
+            source_url=parsed.source_url or parsed.url,
+            raw_metadata_json=raw_metadata_json,
+        )
+    )
+
+
+def _record_identity_metadata(
+    *,
+    db: Session,
+    paper_id: int,
+    record: dict[str, Any],
+    parsed: PaperCreate,
+    source: str | None,
+    lookup: dict[str, int],
+    identifier_keys: set[tuple[str, str]],
+) -> None:
+    for identifier_source, identifier in _identifier_rows_for_record(record, parsed):
+        _upsert_identifier(
+            db=db,
+            paper_id=paper_id,
+            source=identifier_source,
+            identifier=identifier,
+            lookup=lookup,
+            identifier_keys=identifier_keys,
+        )
+    _upsert_source_record(db=db, paper_id=paper_id, record=record, parsed=parsed, source=source)
 
 
 def _insert_pending_edges(
@@ -350,6 +590,7 @@ def ingest_papers_from_file(
     filters_used: dict[str, Any] | None = None,
     notes: str | None = None,
     write_manifest: bool = True,
+    allow_near_title_dedupe: bool = True,
 ) -> dict[str, Any]:
     records = _read_records(path)
     inserted = 0
@@ -358,10 +599,12 @@ def ingest_papers_from_file(
     errors: list[str] = []
     warnings: list[str] = []
     lookup = _load_existing_lookup(db)
+    identifier_keys = _load_existing_identifier_keys(db)
     existing_papers = _load_existing_papers(db)
+    existing_by_id = {paper.id: paper for paper in existing_papers}
     pending_edges: list[tuple[int, str, str, str | None]] = []
     fields_available = sorted({field for record in records for field in record.keys()})
-    parsed_rows: list[tuple[int, PaperCreate]] = []
+    parsed_rows: list[tuple[int, dict[str, Any], PaperCreate]] = []
 
     for row_number, record in enumerate(records, start=1):
         try:
@@ -370,23 +613,39 @@ def ingest_papers_from_file(
             errors.append(str(exc))
             skipped += 1
             continue
-        parsed_rows.append((row_number, parsed))
+        parsed_rows.append((row_number, record, parsed))
 
-    parsed_rows, merged_duplicate_count = _dedupe_parsed_records(parsed_rows, warnings)
+    parsed_rows, merged_duplicate_count = _dedupe_parsed_records(
+        parsed_rows,
+        warnings,
+        allow_near_title_dedupe=allow_near_title_dedupe,
+    )
     skipped += merged_duplicate_count
 
-    for row_number, parsed in parsed_rows:
+    for row_number, record, parsed in parsed_rows:
         dedupe_kind, dedupe_value = _dedupe_key(parsed)
         existing_duplicate, duplicate_kind = _find_existing_duplicate(
+            record,
             parsed,
             lookup=lookup,
             existing_papers=existing_papers,
+            existing_by_id=existing_by_id,
+            allow_near_title_dedupe=allow_near_title_dedupe,
         )
         if existing_duplicate is not None:
             changed = _merge_into_existing_paper(existing_duplicate, parsed)
             db.add(existing_duplicate)
             for key in _paper_lookup_keys(existing_duplicate):
                 lookup[key] = existing_duplicate.id
+            _record_identity_metadata(
+                db=db,
+                paper_id=existing_duplicate.id,
+                record=record,
+                parsed=parsed,
+                source=source,
+                lookup=lookup,
+                identifier_keys=identifier_keys,
+            )
             for reference in parsed.references:
                 pending_edges.append((existing_duplicate.id, reference, "reference", parsed.source or source))
             for citation in parsed.citations:
@@ -423,7 +682,17 @@ def ingest_papers_from_file(
         db.flush()
         for key in _paper_lookup_keys(paper):
             lookup[key] = paper.id
+        _record_identity_metadata(
+            db=db,
+            paper_id=paper.id,
+            record=record,
+            parsed=parsed,
+            source=source,
+            lookup=lookup,
+            identifier_keys=identifier_keys,
+        )
         existing_papers.append(paper)
+        existing_by_id[paper.id] = paper
         for reference in parsed.references:
             pending_edges.append((paper.id, reference, "reference", parsed.source or source))
         for citation in parsed.citations:

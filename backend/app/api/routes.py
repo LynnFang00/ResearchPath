@@ -7,13 +7,24 @@ from app.db.session import get_db
 from app.models.paper import Paper
 from app.schemas.paper import (
     DatasetStatusResponse,
+    FeedbackCreate,
+    FeedbackRead,
+    FeedbackSummaryResponse,
     IngestRequest,
     IngestResponse,
+    LibraryItemResponse,
+    LibraryItemUpsert,
+    LibraryResponse,
+    ProfileRead,
+    ProfileUpdate,
     ReadingPathResponse,
     RecommendationResponse,
 )
 from app.services.dataset_manifest import get_dataset_status
+from app.services.feedback import create_feedback_event, feedback_summary
 from app.services.ingestion import ingest_papers_from_file
+from app.services.library import delete_library_item, list_library_items, upsert_library_item
+from app.services.profile import get_or_create_profile, profile_to_read, update_profile
 from app.services.recommendation_service import (
     SUPPORTED_RETRIEVAL_METHODS,
     recommend_from_paper,
@@ -32,6 +43,48 @@ def health() -> dict[str, str]:
 @router.get("/dataset/status", response_model=DatasetStatusResponse)
 def dataset_status(db: Session = Depends(get_db)) -> DatasetStatusResponse:
     return DatasetStatusResponse(**get_dataset_status(db=db))
+
+
+@router.post("/feedback", response_model=FeedbackRead)
+def create_feedback(payload: FeedbackCreate, db: Session = Depends(get_db)) -> FeedbackRead:
+    paper = db.get(Paper, payload.paper_id)
+    if paper is None:
+        raise HTTPException(status_code=404, detail=f"Paper with id={payload.paper_id} was not found.")
+    return FeedbackRead.model_validate(create_feedback_event(db, payload))
+
+
+@router.get("/feedback/summary", response_model=FeedbackSummaryResponse)
+def get_feedback_summary(db: Session = Depends(get_db)) -> FeedbackSummaryResponse:
+    return feedback_summary(db)
+
+
+@router.get("/profile", response_model=ProfileRead)
+def get_profile(db: Session = Depends(get_db)) -> ProfileRead:
+    return profile_to_read(get_or_create_profile(db))
+
+
+@router.patch("/profile", response_model=ProfileRead)
+def patch_profile(payload: ProfileUpdate, db: Session = Depends(get_db)) -> ProfileRead:
+    return update_profile(db, payload)
+
+
+@router.get("/library", response_model=LibraryResponse)
+def get_library(tag: str | None = Query(None, description="Optional tag filter."), db: Session = Depends(get_db)) -> LibraryResponse:
+    return list_library_items(db, tag=tag)
+
+
+@router.post("/library/items", response_model=LibraryItemResponse)
+def save_library_item(payload: LibraryItemUpsert, db: Session = Depends(get_db)) -> LibraryItemResponse:
+    try:
+        return upsert_library_item(db, payload)
+    except ValueError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+
+
+@router.delete("/library/items/{paper_id}")
+def remove_library_item(paper_id: int, db: Session = Depends(get_db)) -> dict[str, str]:
+    delete_library_item(db, paper_id)
+    return {"status": "deleted"}
 
 
 @router.post("/papers/ingest", response_model=IngestResponse)

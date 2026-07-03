@@ -3,10 +3,13 @@ from __future__ import annotations
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
+from typing import Any
 
 from app.models.paper import Paper
 from app.services.bm25 import BM25Retriever
 from app.services.difficulty import score_difficulty
+from app.services.learned_ranker import LinearRanker, load_linear_ranker
+from app.services.personalization import score_personalization
 from app.services.quality_signals import (
     QualitySignals,
     compute_quality_signals,
@@ -20,7 +23,7 @@ from app.services.retrievers.tfidf import TfidfRetriever
 
 @dataclass(frozen=True)
 class HybridScoredDocument(ScoredDocument):
-    components: dict[str, float]
+    components: dict[str, Any]
 
 
 class HybridRetriever:
@@ -34,6 +37,8 @@ class HybridRetriever:
         faiss_id_map_path: Path | None = None,
         embedding_model_name: str = "sentence-transformers/all-MiniLM-L6-v2",
         background_level: str = "basic_ml",
+        profile: dict[str, Any] | None = None,
+        learned_ranker_path: Path | None = None,
         current_year: int | None = None,
     ) -> None:
         self.papers = papers
@@ -47,8 +52,10 @@ class HybridRetriever:
             embedding_model_name=embedding_model_name,
         )
         self.background_level = background_level
+        self.profile = profile
+        self.learned_ranker = self._load_learned_ranker(learned_ranker_path)
         self.current_year = current_year or datetime.now(UTC).year
-        self.last_components: dict[int, dict[str, float]] = {}
+        self.last_components: dict[int, dict[str, Any]] = {}
 
     def fit(self, papers: list[PaperDocument]) -> None:
         self.documents = papers
@@ -99,8 +106,19 @@ class HybridRetriever:
                 faiss_score=faiss_scores.get(paper_id, 0.0),
                 current_year=self.current_year,
             )
-            score = hybrid_score(signals)
-            components = signals.diagnostics() | {"hybrid_score": round(score, 6)}
+            personalization = score_personalization(
+                paper=paper,
+                paper_by_id=self.paper_by_id,
+                profile=self.profile,
+                difficulty=difficulty,
+                background_level=self.background_level,
+            )
+            base_score = hybrid_score(signals) + personalization.score
+            components = signals.diagnostics() | personalization.diagnostics() | {
+                "hybrid_score": round(base_score, 6),
+            }
+            components["personalization_reason"] = personalization.reason
+            score = self._apply_learned_ranker(base_score, components)
             self.last_components[paper_id] = components
             if score <= 0:
                 continue
@@ -108,8 +126,27 @@ class HybridRetriever:
 
         return sorted(scored, key=lambda item: item.score, reverse=True)[:k]
 
-    def components_for(self, paper_id: int) -> dict[str, float]:
+    def components_for(self, paper_id: int) -> dict[str, Any]:
         return self.last_components.get(paper_id, {})
+
+    def _apply_learned_ranker(self, base_score: float, components: dict[str, Any]) -> float:
+        if self.learned_ranker is None:
+            components["learned_ranker_score"] = 0.0
+            components["learned_ranker_adjustment"] = 0.0
+            components["learned_ranker_version"] = ""
+            return base_score
+
+        learned_score = self.learned_ranker.score(components)
+        adjustment = 0.25 * (learned_score - 0.5)
+        components.update(self.learned_ranker.diagnostics(components))
+        components["learned_ranker_adjustment"] = round(adjustment, 6)
+        return base_score + adjustment
+
+    def _load_learned_ranker(self, learned_ranker_path: Path | None) -> LinearRanker | None:
+        try:
+            return load_linear_ranker(learned_ranker_path)
+        except (OSError, ValueError):
+            return None
 
     def _load_faiss(
         self,

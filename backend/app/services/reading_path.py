@@ -1,12 +1,14 @@
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
 import math
+from typing import Any
 
 from app.models.paper import Paper
 from app.schemas.paper import PathPaper, PathSectionStatus, ReadingPathResponse
 from app.services.difficulty import DifficultyResult, score_difficulty
 from app.services.formatting import make_snippet, split_semicolon_field
 from app.services.deduplication import completeness_score, duplicate_match
+from app.services.paper_types import classify_paper_types
 from app.services.quality_signals import (
     SECTION_NAMES,
     compute_quality_signals,
@@ -27,7 +29,7 @@ class PathCandidate:
     score: float
     method: str
     explanation: str
-    retrieval_components: dict[str, float] = field(default_factory=dict)
+    retrieval_components: dict[str, Any] = field(default_factory=dict)
 
 
 @dataclass(frozen=True)
@@ -77,11 +79,25 @@ def plan_reading_path(
             normalized_score=normalized_candidate_scores.get(index, 0.0),
         )
         for section in PATH_SECTIONS:
-            section_score = score_for_section(section, signals, query=query)
+            personalization_score = float(candidate.retrieval_components.get("personalization_score", 0.0) or 0.0)
+            section_score = score_for_section(section, signals, query=query) + personalization_score
             diagnostics = signals.diagnostics() | {
                 "section_score": round(section_score, 6),
                 "final_path_score": round(section_score, 6),
+                "personalization_score": round(personalization_score, 6),
+                "saved_similarity": float(candidate.retrieval_components.get("saved_similarity", 0.0) or 0.0),
+                "skipped_similarity": float(candidate.retrieval_components.get("skipped_similarity", 0.0) or 0.0),
+                "too_hard_similarity": float(candidate.retrieval_components.get("too_hard_similarity", 0.0) or 0.0),
+                "topic_similarity": float(candidate.retrieval_components.get("topic_similarity", 0.0) or 0.0),
+                "learned_ranker_score": float(candidate.retrieval_components.get("learned_ranker_score", 0.0) or 0.0),
+                "learned_ranker_adjustment": float(
+                    candidate.retrieval_components.get("learned_ranker_adjustment", 0.0) or 0.0
+                ),
             }
+            if "personalization_reason" in candidate.retrieval_components:
+                diagnostics["personalization_reason"] = candidate.retrieval_components["personalization_reason"]
+            if "learned_ranker_version" in candidate.retrieval_components:
+                diagnostics["learned_ranker_version"] = candidate.retrieval_components["learned_ranker_version"]
             planned_by_section[section].append(
                 PlannedPaper(
                     candidate=candidate,
@@ -190,12 +206,16 @@ def _duplicate_survivor_quality(candidate: PathCandidate) -> float:
 def planned_to_response(planned: PlannedPaper, *, override_section: str | None = None) -> PathPaper:
     paper = planned.candidate.paper
     section = override_section or planned.section
+    paper_type_tags = classify_paper_types(paper)
+    confidence_label = _confidence_label(planned.diagnostics["final_path_score"])
+    explanation_signals = _explanation_signals(planned.diagnostics, paper_type_tags)
     return PathPaper(
         paper_id=paper.id,
         title=paper.title,
         abstract_snippet=make_snippet(paper.abstract),
         year=paper.year,
         authors=split_semicolon_field(paper.authors),
+        venue=paper.venue,
         score=round(float(planned.candidate.score), 6),
         method=planned.candidate.method,
         explanation=planned.candidate.explanation,
@@ -219,4 +239,79 @@ def planned_to_response(planned: PlannedPaper, *, override_section: str | None =
         section_score=planned.diagnostics["section_score"],
         duplicate_penalty=planned.diagnostics["duplicate_penalty"],
         final_path_score=planned.diagnostics["final_path_score"],
+        why_recommended=_why_recommended(section, paper_type_tags, confidence_label),
+        why_this_section=planned.reason,
+        confidence_label=confidence_label,
+        read_before=_read_before(section),
+        read_after=_read_after(section),
+        explanation_signals=explanation_signals,
+        paper_type_tags=paper_type_tags,
+        personalization_score=planned.diagnostics.get("personalization_score", 0.0),
+        personalization_reason=str(planned.diagnostics.get("personalization_reason", "")) or None,
+        saved_similarity=planned.diagnostics.get("saved_similarity", 0.0),
+        skipped_similarity=planned.diagnostics.get("skipped_similarity", 0.0),
+        too_hard_similarity=planned.diagnostics.get("too_hard_similarity", 0.0),
+        topic_similarity=planned.diagnostics.get("topic_similarity", 0.0),
+        learned_ranker_score=planned.diagnostics.get("learned_ranker_score", 0.0),
+        learned_ranker_adjustment=planned.diagnostics.get("learned_ranker_adjustment", 0.0),
+        learned_ranker_version=str(planned.diagnostics.get("learned_ranker_version", "")) or None,
     )
+
+
+def _confidence_label(score: float) -> str:
+    if score >= 0.72:
+        return "high"
+    if score >= 0.45:
+        return "medium"
+    return "low"
+
+
+def _why_recommended(section: str, tags: list[str], confidence_label: str) -> str:
+    readable_section = {
+        "background": "background",
+        "foundational": "foundational",
+        "core_methods": "core methods",
+        "recent_frontier": "recent frontier",
+    }[section]
+    tag_text = ", ".join(tags[:3])
+    return f"Recommended as {readable_section} with {confidence_label} confidence based on {tag_text} signals."
+
+
+def _read_before(section: str) -> list[str]:
+    if section == "background":
+        return []
+    if section == "foundational":
+        return ["Background"]
+    if section == "core_methods":
+        return ["Background", "Foundational"]
+    return ["Background", "Foundational", "Core Methods"]
+
+
+def _read_after(section: str) -> list[str]:
+    if section == "background":
+        return ["Foundational", "Core Methods", "Recent Frontier"]
+    if section == "foundational":
+        return ["Core Methods", "Recent Frontier"]
+    if section == "core_methods":
+        return ["Recent Frontier"]
+    return []
+
+
+def _explanation_signals(diagnostics: dict[str, float], tags: list[str]) -> list[str]:
+    signals: list[str] = []
+    if diagnostics["relevance_score"] >= 0.65:
+        signals.append("strong query match")
+    if diagnostics["citation_score"] >= 6:
+        signals.append("strong citation signal")
+    if diagnostics["recency_score"] >= 0.82:
+        signals.append("recent paper")
+    if diagnostics["difficulty_fit_score"] >= 0.8:
+        signals.append("fits selected background level")
+    if diagnostics["background_signal"] >= 0.5:
+        signals.append("background-friendly framing")
+    if diagnostics["method_signal"] >= 0.5:
+        signals.append("method or architecture signal")
+    if diagnostics.get("personalization_score", 0.0) > 0:
+        signals.append("boosted by profile feedback")
+    signals.extend(tags[:2])
+    return list(dict.fromkeys(signals))[:7]

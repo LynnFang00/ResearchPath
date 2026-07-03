@@ -126,4 +126,4 @@ def score_difficulty(
 
 
 def citation_strength(paper: Paper) -> float:
-    return math.log1p(max(paper.citation_count, 0))
+    return math.log1p(max(paper.citation_count or 0, 0))

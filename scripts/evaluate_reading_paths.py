@@ -117,6 +117,13 @@ def evaluate_reading_paths(
     metrics = compute_metrics(rows=rows, labels=labels)
     report = {
         "created_at": datetime.now(UTC).isoformat(),
+        "experiment": {
+            "name": "reading_path_manual_eval",
+            "ranking_method": method,
+            "label_source": str(DEFAULT_LABELS),
+            "query_source": str(DEFAULT_QUERIES),
+            "model_version": method,
+        },
         "query_count": len(rows),
         "label_count": len(labels),
         "default_method": method,
@@ -141,6 +148,9 @@ def compute_metrics(*, rows: list[dict[str, Any]], labels: list[dict[str, Any]])
             "duplicate_rate": None,
             "too_narrow_rate": None,
             "too_advanced_rate": None,
+            "labeled_precision_at_5": None,
+            "labeled_recall_at_10": None,
+            "labeled_ndcg_at_10": None,
             "average_score_by_section": average_score_by_section,
         }
 
@@ -152,6 +162,7 @@ def compute_metrics(*, rows: list[dict[str, Any]], labels: list[dict[str, Any]])
         "duplicate_rate": _boolean_rate(labels, "duplicate"),
         "too_narrow_rate": _boolean_rate(labels, "too_narrow"),
         "too_advanced_rate": _boolean_rate(labels, "too_advanced"),
+        **_ranking_metrics(rows=rows, labels=labels),
         "average_score_by_section": average_score_by_section,
     }
 
@@ -167,6 +178,66 @@ def _average_score_by_section(rows: list[dict[str, Any]]) -> dict[str, float]:
                 if score is not None:
                     scores_by_section[section].append(float(score))
     return {section: _mean(scores) for section, scores in scores_by_section.items()}
+
+
+def _ranking_metrics(*, rows: list[dict[str, Any]], labels: list[dict[str, Any]]) -> dict[str, float | None]:
+    labels_by_query: dict[str, dict[int, int]] = {}
+    for label in labels:
+        relevance = label.get("relevance_score")
+        if relevance is None:
+            continue
+        labels_by_query.setdefault(label["query_id"], {})[int(label["paper_id"])] = int(relevance)
+
+    precision_at_5: list[float] = []
+    recall_at_10: list[float] = []
+    ndcg_at_10: list[float] = []
+    for row in rows:
+        query_id = row.get("query_id")
+        if query_id is None:
+            continue
+        query_labels = labels_by_query.get(query_id, {})
+        if not query_labels:
+            continue
+        retrieved = _flatten_retrieved_paper_ids(row)
+        relevant_ids = {paper_id for paper_id, relevance in query_labels.items() if relevance >= 2}
+        if not relevant_ids:
+            continue
+        top_5 = retrieved[:5]
+        top_10 = retrieved[:10]
+        precision_at_5.append(sum(1 for paper_id in top_5 if query_labels.get(paper_id, 0) >= 2) / max(len(top_5), 1))
+        recall_at_10.append(sum(1 for paper_id in top_10 if paper_id in relevant_ids) / len(relevant_ids))
+        ndcg_at_10.append(_ndcg(top_10, query_labels, k=10))
+
+    return {
+        "labeled_precision_at_5": _mean(precision_at_5),
+        "labeled_recall_at_10": _mean(recall_at_10),
+        "labeled_ndcg_at_10": _mean(ndcg_at_10),
+    }
+
+
+def _flatten_retrieved_paper_ids(row: dict[str, Any]) -> list[int]:
+    paper_ids: list[int] = []
+    sections = row["reading_path"]["sections"]
+    for section_name in ("background", "foundational", "core_methods", "recent_frontier"):
+        for paper in sections.get(section_name, []):
+            paper_ids.append(int(paper["paper_id"]))
+    return paper_ids
+
+
+def _ndcg(retrieved: list[int], labels: dict[int, int], *, k: int) -> float:
+    gains = [labels.get(paper_id, 0) for paper_id in retrieved[:k]]
+    dcg = sum((2**gain - 1) / math_log2(index + 2) for index, gain in enumerate(gains))
+    ideal_gains = sorted(labels.values(), reverse=True)[:k]
+    ideal = sum((2**gain - 1) / math_log2(index + 2) for index, gain in enumerate(ideal_gains))
+    if ideal == 0:
+        return 0.0
+    return dcg / ideal
+
+
+def math_log2(value: float) -> float:
+    import math
+
+    return math.log2(value)
 
 
 def _boolean_rate(labels: list[dict[str, Any]], field_name: str) -> float | None:

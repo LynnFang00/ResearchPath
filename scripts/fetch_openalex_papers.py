@@ -52,6 +52,21 @@ def normalize_doi(value: str | None) -> str | None:
     return value.lower()
 
 
+def normalize_openalex_updated_at(value: str | None) -> str | None:
+    if not value:
+        return None
+    value = value.strip()
+    if not value:
+        return None
+    if "T" in value:
+        if value.endswith("Z"):
+            return f"{value[:-1]}+00:00"
+        if value.endswith("+00:00"):
+            return value
+        return f"{value}+00:00"
+    return f"{value}T00:00:00+00:00"
+
+
 def reconstruct_abstract(inverted_index: dict[str, list[int]] | None) -> str:
     if not inverted_index:
         return ""
@@ -115,8 +130,7 @@ def openalex_work_to_paper_record(work: dict[str, Any]) -> dict[str, Any]:
         for reference_id in (external_work_id(uri) for uri in work.get("referenced_works") or [])
         if reference_id
     ]
-    updated_date = work.get("updated_date")
-    updated_at = f"{updated_date}T00:00:00+00:00" if updated_date else None
+    updated_at = normalize_openalex_updated_at(work.get("updated_date"))
 
     return {
         "external_id": external_work_id(work.get("id")),
