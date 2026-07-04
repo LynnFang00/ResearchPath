@@ -128,6 +128,120 @@ curl.exe -sS "http://localhost:8000/recommend/query?query=transformer&k=1&method
 
 The sample recommendation returned paper access fields, including DOI/source links.
 
+## Runtime Method Comparison
+
+A local smoke comparison was run across representative queries:
+
+- `transformer`
+- `AI agents for scientific discovery`
+- `graph neural networks`
+
+Compared modes:
+
+- Search: flat top-k recommendation list.
+- Reading Path: sectioned recommendations for Background, Foundational, Core Methods, and Recent Frontier.
+
+Compared methods:
+
+- Keyword match (`bm25`)
+- Personalized blend (`hybrid`)
+- Semantic similarity (`embedding`)
+- Text-aware guarded ranker (`v4_9_guarded_text_blend`)
+- Best offline fusion (`v6_4_safe_fusion`) as a single-query smoke
+
+Observed behavior:
+
+- Search and Reading Path can return different papers because Reading Path re-ranks candidates for section fit.
+- Keyword match is literal and usually fast.
+- Semantic similarity is fast after warmup and useful for conceptual queries.
+- Personalized blend is the main product-facing profile-aware method.
+- Text-aware guarded ranker often returns more canonical/evaluation-aware papers but is slower.
+- Best offline fusion is useful for portfolio/evaluation evidence but is not a good default interactive method.
+
+Example observations:
+
+- `transformer` with Keyword match surfaced `Multimodal Learning With Transformers: A Survey`.
+- `transformer` with Text-aware guarded ranker surfaced `Attention Is All You Need`.
+- `AI agents for scientific discovery` with Semantic similarity produced stronger conceptual path candidates, including LLM-agent and autonomous-chemistry style papers.
+- `graph neural networks` with Semantic similarity surfaced `A Comprehensive Survey on Graph Neural Networks` and `The Graph Neural Network Model` in the reading path.
+
+## Personalization Evidence
+
+Profile tailoring was tested with `method=hybrid`, because that is the method where profile and feedback signals are applied.
+
+### Profile Preference Test
+
+Query:
+
+```text
+neural networks
+```
+
+Baseline empty profile produced broad neural-network results such as:
+
+- `A survey of uncertainty in deep neural networks`
+- `Survey on categorical data for neural networks`
+- `The Future of Neural Networks`
+
+Then the profile was temporarily changed to:
+
+- preferred topics: `graph neural networks`, `graph representation`
+- avoided topics: `medical imaging`
+- research goal: `literature_review`
+- paper taste: `surveys_first`
+
+After the profile change, scores/ranking changed and a graph-related paper appeared in the top results:
+
+- `Graph neural networks in particle physics`
+
+Reading Path diagnostics exposed reasons such as:
+
+- `matches preferred topics`
+- `profile prefers surveys first`
+- `matches avoided topics`
+
+### Feedback Test
+
+Query:
+
+```text
+transformer
+```
+
+Baseline Personalized blend ranking placed this first:
+
+- `Multimodal Learning With Transformers: A Survey`
+
+Then real feedback events were posted:
+
+- `more_like_this` on `Transformer-XL: Attentive Language Models beyond a Fixed-Length Context`
+- `not_relevant` on `Multimodal Learning With Transformers: A Survey`
+- `too_hard` on `Multimodal Learning With Transformers: A Survey`
+
+After feedback, `Transformer-XL: Attentive Language Models beyond a Fixed-Length Context` moved to rank 1 for the same query/method.
+
+Interpretation:
+
+- Feedback and profile edits do tailor recommendations for `hybrid` / `learned_hybrid`.
+- This is transparent heuristic personalization, not online reinforcement learning or model retraining.
+- Other methods remain less profile-aware and are better understood as retrieval/evaluation methods.
+- The user's profile was restored after the experiment.
+
+## Local Dev Server Note
+
+On this Windows setup, Vite may bind to IPv6 localhost by default. If the browser cannot connect to the page, restart the frontend with an explicit IPv4 host:
+
+```powershell
+cd frontend
+npm.cmd run dev -- --host 127.0.0.1
+```
+
+Then open:
+
+```text
+http://127.0.0.1:5173
+```
+
 ## Next Product Work
 
 - Add true multi-user profile selection or auth.

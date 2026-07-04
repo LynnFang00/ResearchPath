@@ -1,6 +1,6 @@
 # ResearchPath Project Context and Progress Log
 
-Last updated: 2026-07-03
+Last updated: 2026-07-04
 
 ## Current Stage: V6.7 Documentation and Demo Packaging
 
@@ -163,6 +163,94 @@ curl.exe -sS "http://localhost:8000/recommend/query?query=transformer&k=1&method
 ```
 
 The sample recommendation response included link fields such as `paper_url`, `doi_url`, `source_url`, and `doi`.
+
+## 2026-07-04 Runtime UX Checks, README Cleanup, and Personalization Evidence
+
+Additional product validation was completed after the frontend/profile pass.
+
+GitHub/README:
+
+- Pushed the code/docs product pass directly to `main` on GitHub:
+  - Commit: `a8a7c76 Add ResearchPath product frontend and ranking pipeline docs`
+- Replaced the long historical README with a concise recruiter/user-facing project overview:
+  - Commit: `034cf90 Simplify README for project overview`
+- README now focuses on:
+  - what ResearchPath does,
+  - user-facing features,
+  - product UI,
+  - retrieval/ranking capabilities,
+  - tech stack,
+  - local run instructions,
+  - recruiter-facing project strengths,
+  - limitations.
+- Detailed history remains in `PROJECT_CONTEXT.md` and `docs/`.
+
+Local runtime note:
+
+- The frontend dev server can bind to IPv6 localhost only if started with the default Vite host on this machine.
+- If `http://localhost:5173` or `http://127.0.0.1:5173` does not connect, restart Vite explicitly:
+
+```powershell
+cd frontend
+npm.cmd run dev -- --host 127.0.0.1
+```
+
+- Verified frontend at `http://127.0.0.1:5173` and backend health at `http://localhost:8000/health`.
+
+Mode/method comparison smoke:
+
+- Ran representative queries across flat Search and Reading Path:
+  - `transformer`
+  - `AI agents for scientific discovery`
+  - `graph neural networks`
+- Compared methods:
+  - Keyword match (`bm25`)
+  - Personalized blend (`hybrid`)
+  - Semantic similarity (`embedding`)
+  - Text-aware guarded ranker (`v4_9_guarded_text_blend`)
+  - Best offline fusion (`v6_4_safe_fusion`) on `transformer` as an extra smoke.
+- Observed behavior:
+  - Search returns flat ranked lists.
+  - Reading Path reselects papers by section and can choose different papers from the same candidate pool.
+  - Keyword match is fast and literal.
+  - Semantic similarity is fast after warmup and often better for conceptual queries.
+  - Personalized blend is the main profile-aware product method.
+  - Text-aware guarded ranker often gives more canonical/evaluation-aware papers but is slower.
+  - Best offline fusion is useful as portfolio/evaluation evidence but remains too slow for default interactive reading-path use.
+
+Personalization experiment:
+
+- Used `method=hybrid` because this is where profile and feedback are applied.
+- Temporarily changed profile preferences, ran queries, then restored the user's profile.
+- Query: `neural networks`.
+- Empty-profile top results were broad neural-network papers.
+- After setting:
+  - preferred topics: `graph neural networks`, `graph representation`,
+  - avoided topics: `medical imaging`,
+  - research goal: `literature_review`,
+  - paper taste: `surveys_first`,
+  the result list changed scores/ranking and promoted a graph-related paper (`Graph neural networks in particle physics`) into the top results.
+- Reading path explanations exposed personalization reasons such as:
+  - `matches preferred topics`,
+  - `profile prefers surveys first`,
+  - `matches avoided topics`.
+
+Feedback experiment:
+
+- Query: `transformer`.
+- Baseline personalized-blend ranking had `Multimodal Learning With Transformers: A Survey` first.
+- Posted real feedback events:
+  - `more_like_this` for `Transformer-XL: Attentive Language Models beyond a Fixed-Length Context`,
+  - `not_relevant` for `Multimodal Learning With Transformers: A Survey`,
+  - `too_hard` for the same survey.
+- After feedback, `Transformer-XL` moved to rank 1 for the same query/method.
+- Reading Path diagnostics showed positive and negative personalization components on selected papers.
+
+Important interpretation:
+
+- Tailoring is real for `hybrid` / `learned_hybrid`, but it is heuristic profile personalization, not online reinforcement learning or model retraining.
+- Other methods are less profile-aware and mostly behave as retrieval/evaluation methods.
+- Profile state was restored after the experiment.
 
 ## Historical Stage: Starting V2 Evaluation and Corpus Expansion
 
