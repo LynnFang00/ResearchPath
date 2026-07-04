@@ -10,6 +10,8 @@ __pycache__/
 htmlcov/
 .coverage
 
+PROJECT_CONTEXT.md
+
 backend/data/indexes/
 backend/data/*.db
 
